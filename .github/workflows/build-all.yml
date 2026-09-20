@@ -1,0 +1,101 @@
+name: Build Android & iOS
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          cache-read-only: false
+
+      - name: Ensure .env fallback file exists
+        run: |
+          if [ ! -f .env ]; then
+            echo "Creating fallback .env file"
+            echo 'KEY="dummy"' > .env
+            echo 'GEMINI_API_KEY=""' >> .env
+            echo 'FIREBASE_APPCHECK_DEBUG_TOKEN=""' >> .env
+          fi
+
+      - name: Restore or generate debug.keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            echo "Restoring debug.keystore from base64"
+            base64 -d debug.keystore.base64 > debug.keystore || true
+          fi
+          if [ ! -f debug.keystore ] || [ ! -s debug.keystore ]; then
+            echo "Generating new debug.keystore via keytool"
+            keytool -genkey -v -keystore debug.keystore -storepass android \
+              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Validate Signing and Build Debug APK
+        run: |
+          chmod +x gradlew || true
+          gradle :app:validateSigningDebug :app:assembleDebug --stacktrace
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+  build-ios:
+    name: Build iOS IPA (Unsigned)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build with xcodebuild (Unsigned)
+        run: |
+          xcodebuild build \
+            -project iosApp/SpaceDodger.xcodeproj \
+            -scheme SpaceDodger \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/ios \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES
+
+      - name: Package Unsigned IPA
+        run: |
+          mkdir -p build/ios/ipa/Payload
+          APP_PATH=$(find build/ios/Build/Products -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: .app file not found!"
+            exit 1
+          fi
+          cp -R "$APP_PATH" build/ios/ipa/Payload/
+          cd build/ios/ipa
+          zip -r SpaceDodger-unsigned.ipa Payload
+
+      - name: Upload iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: build/ios/ipa/SpaceDodger-unsigned.ipa
+          if-no-files-found: warn
